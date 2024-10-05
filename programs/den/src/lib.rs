@@ -152,8 +152,8 @@ pub mod den {
             .filter(|entry| {
                 (parameters.hsn_number.is_empty() || entry.hsn_number == parameters.hsn_number)
                     && (parameters.amount_range.is_none()
-                        || (entry.amount >= parameters.amount_range.unwrap().0
-                            && entry.amount <= parameters.amount_range.unwrap().1))
+                        || (entry.amount >= parameters.amount_range.clone().unwrap().min
+                            && entry.amount <= parameters.amount_range.clone().unwrap().max))
             }).cloned()
             .collect();
 
@@ -302,10 +302,16 @@ pub struct EconomicDataEntry {
     pub signature: String,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+pub struct Range {
+    pub min: u64,
+    pub max: u64,
+}
+
 #[account]
 pub struct QueryParameters {
     pub hsn_number: String,
-    pub amount_range: Option<(u64, u64)>,
+    pub amount_range: Option<Range>,
 }
 
 #[account]
