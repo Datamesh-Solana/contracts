@@ -165,6 +165,25 @@ pub mod den {
 
         Ok(QueryResponse { data, status })
     }
+
+    // share to earn
+    pub fn share_to_earn(ctx: Context<ShareToEarn>, invoice_data: String) -> Result<ShareToEarnResponse> {
+        let user = &mut ctx.accounts.user_account;
+
+        // rewards 10 scores for each share
+        let reward = 10;
+        user.total_rewards += reward;
+
+        // save invoice data
+        user.invoice_data.push(invoice_data);
+
+        Ok(ShareToEarnResponse {
+            success: true,
+            total_rewards: user.total_rewards,
+            message: "Thank you for sharing your invoice!".to_string(),
+        })
+    }
+
 }
 
 #[account]
@@ -284,6 +303,13 @@ pub struct RemoveNode<'info> {
     pub node: Account<'info, NodeAccount>,
 }
 
+#[derive(Accounts)]
+pub struct ShareToEarn<'info> {
+    #[account(mut)]
+    pub user_account: Account<'info, UserAccount>,
+}
+
+
 #[account]
 pub struct NodeAccount {
     pub node_id: Pubkey,
@@ -336,5 +362,18 @@ pub struct NodeStatsResponse {
 #[account]
 pub struct RemoveResponse {
     pub status: bool,
+    pub message: String,
+}
+
+#[account]
+pub struct UserAccount {
+    pub user_id: Pubkey,
+    pub total_rewards: u64,
+    pub invoice_data: Vec<String>,
+}
+#[account]
+pub struct ShareToEarnResponse {
+    pub success: bool,
+    pub total_rewards: u64,
     pub message: String,
 }
