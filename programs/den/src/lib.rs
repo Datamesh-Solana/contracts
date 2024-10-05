@@ -136,7 +136,6 @@ pub mod den {
             message: "Node removed successfully".to_string(),
         })
     }
-
     pub fn query_economic_data(
         ctx: Context<QueryEconomicData>,
         start_date: i64,
@@ -144,25 +143,26 @@ pub mod den {
         parameters: QueryParameters,
     ) -> Result<QueryResponse> {
         let node = &ctx.accounts.node;
-
+    
         let data: Vec<EconomicDataEntry> = node
             .data
             .iter()
             .filter(|entry| entry.timestamp >= start_date && entry.timestamp <= end_date)
             .filter(|entry| {
-                (parameters.hsn_number.is_empty() || entry.hsn_number == parameters.hsn_number)
-                    && (parameters.amount_range.is_none()
-                        || (entry.amount >= parameters.amount_range.clone().unwrap().min
-                            && entry.amount <= parameters.amount_range.clone().unwrap().max))
-            }).cloned()
+                (parameters.hsn_number.is_empty() || entry.hsn_number == parameters.hsn_number) &&
+                (parameters.amount_range.is_none() ||
+                 (entry.amount >= parameters.amount_range.unwrap().min &&
+                  entry.amount <= parameters.amount_range.unwrap().max))
+            })
+            .cloned()
             .collect();
-
+    
         let status = if data.is_empty() {
             "no data found"
         } else {
             "successful"
         }.to_string();
-
+    
         Ok(QueryResponse { data, status })
     }
 
@@ -328,7 +328,7 @@ pub struct EconomicDataEntry {
     pub signature: String,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
+#[derive(Copy, AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Range {
     pub min: u64,
     pub max: u64,
