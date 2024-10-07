@@ -1,10 +1,10 @@
 use anchor_lang::prelude::*;
-
+use sha2::{Sha256, Digest};
 
 use std::collections::HashMap;
 // This is your program's public key and it will update
 // automatically when you build the project.
-declare_id!("D8tQBi2nELbNkAzkZz5FQBN28tAQFNpWL73HakbC4qCT");
+declare_id!("AH71wvrtpPnLzVYvB2SgLKA6KkNihrsffrKD6TbTCisU");
 
 pub struct NewsArticle {
     pub author: String,
@@ -78,18 +78,25 @@ pub mod den {
         let node = &mut ctx.accounts.node;
 
         let new_entry = EconomicDataEntry {
-            invoice_data,
-            hsn_number,
             amount,
             quantity,
             timestamp,
-            signature,
+            hsn_number: hsn_number.trim().to_string(),
+            invoice_data: invoice_data.trim().to_string(),
+            signature: signature.trim().to_string(),
         };
 
         node.data.push(new_entry);
 
-        let transaction_hash = "generated_hash".to_string();
-
+        let mut hasher = Sha256::new();
+        hasher.update(invoice_data.as_bytes());
+        hasher.update(hsn_number.as_bytes());
+        hasher.update(amount.to_le_bytes());
+        hasher.update(quantity.to_le_bytes());
+        hasher.update(timestamp.to_le_bytes());
+        hasher.update(signature.as_bytes());
+        let transaction_hash = format!("{:x}", hasher.finalize());
+       
         Ok(SubmitResponse {
             success: true,
             transaction_hash,
@@ -278,8 +285,17 @@ pub struct InvoiceData {
 
 #[derive(Accounts)]
 pub struct SubmitEconomicData<'info> {
+    #[account(
+        init,
+        payer = user,
+        space = 8 + NodeAccount::BASE_SIZE,  // Calculate the size manually
+        seeds = [b"DATAMESH_NODE", user.key.as_ref()],
+        bump
+    )]    
+    pub node: Account<'info, NodeAccount>,  // NodeAccount is your custom struct for the account
     #[account(mut)]
-    pub node: Account<'info, NodeAccount>,
+    pub user: Signer<'info>,                // The user who is paying for the transaction
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
@@ -316,6 +332,10 @@ pub struct NodeAccount {
     pub data: Vec<EconomicDataEntry>,
     pub active_since: i64,
     pub is_active: bool,
+}
+
+impl NodeAccount {
+    pub const BASE_SIZE: usize = 32 + 8 + 1; // node_id (Pubkey), active_since (i64), is_active (bool)
 }
 
 #[account]

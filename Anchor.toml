@@ -3,13 +3,16 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-den = "D8tQBi2nELbNkAzkZz5FQBN28tAQFNpWL73HakbC4qCT"
+den = "AH71wvrtpPnLzVYvB2SgLKA6KkNihrsffrKD6TbTCisU"
+
+[programs.devnet]
+den = "AH71wvrtpPnLzVYvB2SgLKA6KkNihrsffrKD6TbTCisU"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
+cluster = "Devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
