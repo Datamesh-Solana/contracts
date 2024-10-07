@@ -31,6 +31,7 @@ pub trait Summary {
 
 #[program]
 pub mod den {
+
     use super::*;
     pub fn initialize(ctx: Context<Initialize>, nfts: Vec<Pubkey>) -> Result<()> {
         let state = &mut ctx.accounts.state;
@@ -84,6 +85,7 @@ pub mod den {
             hsn_number: hsn_number.trim().to_string(),
             invoice_data: invoice_data.trim().to_string(),
             signature: signature.trim().to_string(),
+            is_verified: false,
         };
 
         node.data.push(new_entry);
@@ -101,6 +103,37 @@ pub mod den {
             success: true,
             transaction_hash,
         })
+    }
+
+
+    pub fn validate_invoice_data(
+        ctx: Context<ValidateNode>,
+        hsn_number: String,
+    ) -> Result<()> {
+        let node = &mut ctx.accounts.node;
+        let admin_pubkey = ctx.accounts.admin.key.to_string();
+
+        // List of admin public keys
+        let admin_pubkeys: &[String] = &[
+            String::from("FH5uTSXBJF4ZdF6UPPB5hzatuftB7mcyv6zsBWGz488p")
+            // Add more admins as needed
+        ];
+
+        // Check if the payer's public key is one of the admin public keys
+        if !admin_pubkeys.contains(&admin_pubkey) {
+            // If the payer is not an admin, return an error
+            return Err(ErrorCode::ConstraintSigner.into());
+        }
+
+        for entry in node.data.iter_mut() {
+            if hsn_number.eq(&entry.hsn_number) {
+                entry.is_verified = true;
+                node.total_rewards += (entry.invoice_data.len() / 1000) as u64;
+                break
+            }
+        }
+
+        Ok(())
     }
 
     pub fn validate_node(
@@ -171,24 +204,6 @@ pub mod den {
         }.to_string();
     
         Ok(QueryResponse { data, status })
-    }
-
-    // share to earn
-    pub fn share_to_earn(ctx: Context<ShareToEarn>, invoice_data: String) -> Result<ShareToEarnResponse> {
-        let user = &mut ctx.accounts.user_account;
-
-        // rewards 10 scores for each share
-        let reward = 10;
-        user.total_rewards += reward;
-
-        // save invoice data
-        user.invoice_data.push(invoice_data);
-
-        Ok(ShareToEarnResponse {
-            success: true,
-            total_rewards: user.total_rewards,
-            message: "Thank you for sharing your invoice!".to_string(),
-        })
     }
 
 }
@@ -300,7 +315,10 @@ pub struct SubmitEconomicData<'info> {
 
 #[derive(Accounts)]
 pub struct ValidateNode<'info> {
+    #[account(mut)]
     pub node: Account<'info, NodeAccount>,
+    #[account(mut)]
+    pub admin: Signer<'info>,                // The user who is paying for the transaction
 }
 
 #[derive(Accounts)]
@@ -319,23 +337,17 @@ pub struct RemoveNode<'info> {
     pub node: Account<'info, NodeAccount>,
 }
 
-#[derive(Accounts)]
-pub struct ShareToEarn<'info> {
-    #[account(mut)]
-    pub user_account: Account<'info, UserAccount>,
-}
-
-
 #[account]
 pub struct NodeAccount {
     pub node_id: Pubkey,
     pub data: Vec<EconomicDataEntry>,
     pub active_since: i64,
     pub is_active: bool,
+    pub total_rewards: u64,
 }
 
 impl NodeAccount {
-    pub const BASE_SIZE: usize = 32 + 8 + 1; // node_id (Pubkey), active_since (i64), is_active (bool)
+    pub const BASE_SIZE: usize = 32 + 8 + 1 + 8; // node_id (Pubkey), active_since (i64), is_active (bool), total_rewards(u64)
 }
 
 #[account]
@@ -346,6 +358,7 @@ pub struct EconomicDataEntry {
     pub quantity: u32,
     pub timestamp: i64,
     pub signature: String,
+    pub is_verified: bool
 }
 
 #[derive(Copy, AnchorSerialize, AnchorDeserialize, Clone)]
@@ -388,18 +401,5 @@ pub struct NodeStatsResponse {
 #[account]
 pub struct RemoveResponse {
     pub status: bool,
-    pub message: String,
-}
-
-#[account]
-pub struct UserAccount {
-    pub user_id: Pubkey,
-    pub total_rewards: u64,
-    pub invoice_data: Vec<String>,
-}
-#[account]
-pub struct ShareToEarnResponse {
-    pub success: bool,
-    pub total_rewards: u64,
     pub message: String,
 }
