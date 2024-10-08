@@ -3,13 +3,28 @@ use sha2::{Digest, Sha256};
 
 // This is your program's public key and it will update
 // automatically when you build the project.
-declare_id!("EsbhiLkhqEbwcJnTrCoM6hH8xscgcE8xatPLm4jCGgXa");
+declare_id!("E8U7pFdKv4qBB4jTS1JCT8HsMjTQK9BW4eRM7xETLuFQ");
 
 #[program]
 pub mod den {
     use anchor_lang::solana_program::{program::invoke, system_instruction};
 
     use super::*;
+    pub fn initialize_node(ctx: Context<Initialize>) -> Result<()> {
+        let node = &mut ctx.accounts.node;
+
+        msg!("Initializing new node account...");
+
+        node.node_id = node.key();
+        node.active_since = Clock::get()?.unix_timestamp;
+        node.is_active = true;
+        node.data = Vec::new(); // Initialize the empty vector
+
+        msg!("Node account is initialized to: {:?}", node);
+
+        Ok(())
+    }
+
     pub fn submit_economic_data(
         ctx: Context<SubmitEconomicData>,
         invoice_data: String,
@@ -24,17 +39,6 @@ pub mod den {
         let node_account_info = node.to_account_info();
 
         msg!("Deserialized accounts....");
-
-        // Initialize the account if it's the first time
-        if node_account_info.data_is_empty() {
-            node.node_id = node_account_info.key();
-            node.active_since = Clock::get()?.unix_timestamp;
-            node.is_active = true;
-            node.data = Vec::new(); // Initialize the empty vector
-            msg!("Initialized new node account...");
-        }
-
-        msg!("Node account before adding new entry: {:?}", node);
 
         let new_entry = EconomicDataEntry {
             amount,
@@ -101,7 +105,10 @@ pub mod den {
         })
     }
 
-    pub fn validate_invoice_data(ctx: Context<ValidateNode>, hsn_number: String) -> Result<()> {
+    pub fn validate_invoice_data(
+        ctx: Context<ValidateInvoiceData>,
+        hsn_number: String,
+    ) -> Result<()> {
         let node = &mut ctx.accounts.node;
         let admin_pubkey = ctx.accounts.admin.key.to_string();
 
@@ -121,25 +128,21 @@ pub mod den {
         for entry in node.data.iter_mut() {
             if hsn_number.eq(&entry.hsn_number) {
                 entry.is_verified = true;
-                node.total_rewards += (entry.invoice_data.trim().len() / 1000) as u64;
-                break;
+                node.total_rewards += (entry.invoice_data.trim().len() / 1000) as f64;
+
+                msg!("Updated node account rewards: {}", node.total_rewards);
+
+                return Ok(());
             }
         }
 
-        Ok(())
+        // no record was found with the provided hsn_number
+        Err(ErrorCode::RequireEqViolated.into())
     }
 }
 
-#[account]
-pub struct InvoiceData {
-    pub hsn_number: String,
-    pub amount: u64,
-    pub quantity: u64,
-    pub timestamp: i64,
-}
-
 #[derive(Accounts)]
-pub struct SubmitEconomicData<'info> {
+pub struct Initialize<'info> {
     #[account(
         init,
         payer = user,
@@ -153,10 +156,31 @@ pub struct SubmitEconomicData<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[account]
+pub struct InvoiceData {
+    pub hsn_number: String,
+    pub amount: u64,
+    pub quantity: u64,
+    pub timestamp: i64,
+}
+
 #[derive(Accounts)]
-pub struct ValidateNode<'info> {
+pub struct SubmitEconomicData<'info> {
+    #[account(
+        mut,
+        seeds = [b"DATAMESH_NODE", user.key.as_ref()],
+        bump
+    )]
+    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
     #[account(mut)]
-    pub node: Account<'info, NodeAccount>,
+    pub user: Signer<'info>, // The user who is paying for the transaction
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct ValidateInvoiceData<'info> {
+    #[account(mut)]
+    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
     #[account(mut)]
     pub admin: Signer<'info>, // The user who is paying for the transaction
 }
@@ -168,7 +192,7 @@ pub struct NodeAccount {
     pub data: Vec<EconomicDataEntry>,
     pub active_since: i64,
     pub is_active: bool,
-    pub total_rewards: u64,
+    pub total_rewards: f64,
 }
 
 impl NodeAccount {
