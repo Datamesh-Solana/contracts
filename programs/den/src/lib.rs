@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 
 // This is your program's public key and it will update
 // automatically when you build the project.
-declare_id!("E8U7pFdKv4qBB4jTS1JCT8HsMjTQK9BW4eRM7xETLuFQ");
+declare_id!("4QdkkRpdSJo2Ut3zifVLnZ3VjJRJwa8kmmRCe5ZXSttQ");
 
 #[program]
 pub mod den {
@@ -115,7 +115,7 @@ pub mod den {
         // List of admin public keys
         let admin_pubkeys: &[String] = &[
             String::from("FH5uTSXBJF4ZdF6UPPB5hzatuftB7mcyv6zsBWGz488p"),
-            String::from("EJgDmNKrTo1obSpANo6EDXZXbmChptzXJacdX5n82oYw"),
+            String::from("HfnUVwxtz83sF812JcVDACiJootAkuc2wyXvHiRpGTpi"),
             // Add more admins as needed
         ];
 
