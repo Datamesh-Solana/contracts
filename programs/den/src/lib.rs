@@ -1,67 +1,26 @@
 use anchor_lang::prelude::*;
+use sha2::{Digest, Sha256};
 
-
-use std::collections::HashMap;
 // This is your program's public key and it will update
 // automatically when you build the project.
-declare_id!("D8tQBi2nELbNkAzkZz5FQBN28tAQFNpWL73HakbC4qCT");
-
-pub struct NewsArticle {
-    pub author: String,
-    pub headline: String,
-    pub content: String,
-}
-
-impl Summary for NewsArticle {
-    fn summaryze(&self) {
-        msg!("summaryze {}", self.author);
-    }
-}
-
-pub struct Tweet {
-    pub username: String,
-    pub content: String,
-    pub reply: bool,
-    pub retweet: bool,
-}
-
-pub trait Summary {
-    fn summaryze(&self);
-}
+declare_id!("E8U7pFdKv4qBB4jTS1JCT8HsMjTQK9BW4eRM7xETLuFQ");
 
 #[program]
 pub mod den {
+    use anchor_lang::solana_program::{program::invoke, system_instruction};
+
     use super::*;
-    pub fn initialize(ctx: Context<Initialize>, nfts: Vec<Pubkey>) -> Result<()> {
-        let state = &mut ctx.accounts.state;
-        state.nfts = nfts;
-        Ok(())
-    }
+    pub fn initialize_node(ctx: Context<Initialize>) -> Result<()> {
+        let node = &mut ctx.accounts.node;
 
-    pub fn update_nfts(ctx: Context<UpdateNfts>, nfts: Vec<Pubkey>) -> Result<()> {
-        let state = &mut ctx.accounts.state;
-        state.nfts = nfts;
-        let mut scores = HashMap::new();
+        msg!("Initializing new node account...");
 
-        scores.insert(String::from("Blue"), 10);
-        scores.insert(String::from("Blue"), 20);
+        node.node_id = node.key();
+        node.active_since = Clock::get()?.unix_timestamp;
+        node.is_active = true;
+        node.data = Vec::new(); // Initialize the empty vector
 
-        let text = "hello world wonderful world";
-        let mut map = HashMap::new();
-        for word in text.split_whitespace() {
-            let count = map.entry(word).or_insert(0);
-            *count += 1;
-        }
-        msg!("{:?}", map);
-
-        Ok(())
-    }
-
-    pub fn show_nfts(ctx: Context<ShowNfts>) -> Result<()> {
-        let state = &mut ctx.accounts.state;
-        for (index, nft_pubkey) in state.nfts.iter().enumerate() {
-            msg!("NFT at index {}: {:?}", index, nft_pubkey);
-        }
+        msg!("Node account is initialized to: {:?}", node);
 
         Ok(())
     }
@@ -75,20 +34,70 @@ pub mod den {
         timestamp: i64,
         signature: String,
     ) -> Result<SubmitResponse> {
+        msg!("Started deserializing accounts....");
         let node = &mut ctx.accounts.node;
+        let node_account_info = node.to_account_info();
+
+        msg!("Deserialized accounts....");
 
         let new_entry = EconomicDataEntry {
-            invoice_data,
-            hsn_number,
             amount,
             quantity,
             timestamp,
-            signature,
+            hsn_number: hsn_number.trim().to_string(),
+            invoice_data: invoice_data.trim().to_string(),
+            signature: signature.trim().to_string(),
+            is_verified: false,
         };
 
+        // Calculate the new required size if adding a new entry
+        let current_size = node.to_account_info().data_len();
+        let required_size = (current_size + new_entry.size() + 4) * 2;
+
+        // Check if we need to realloc (expand) the account size
+        let rent = Rent::get()?;
+        let required_lamports = rent.minimum_balance(required_size);
+
+        // Fund the account if needed
+        if node_account_info.lamports() < required_lamports {
+            msg!(
+                "Reallocating account to accommodate more data ({}, {})...",
+                required_size,
+                current_size
+            );
+
+            invoke(
+                &system_instruction::transfer(
+                    &ctx.accounts.user.key(),
+                    &node.key(),
+                    required_lamports - node_account_info.lamports(),
+                ),
+                &[
+                    ctx.accounts.user.to_account_info(),
+                    node.to_account_info(),
+                    ctx.accounts.system_program.to_account_info(),
+                ],
+            )?;
+            node_account_info.realloc(required_size, false)?;
+        }
+
+        // Add the new entry to the vector
         node.data.push(new_entry);
 
-        let transaction_hash = "generated_hash".to_string();
+        msg!("Updated node account after adding new entry: {:?}", node);
+
+        // Create a hash of the submitted economic data as a transaction identifier
+        let mut hasher = Sha256::new();
+        hasher.update(invoice_data.as_bytes());
+        hasher.update(hsn_number.as_bytes());
+        hasher.update(amount.to_le_bytes());
+        hasher.update(quantity.to_le_bytes());
+        hasher.update(timestamp.to_le_bytes());
+        hasher.update(signature.as_bytes());
+
+        let transaction_hash = format!("{:x}", hasher.finalize());
+
+        msg!("Transaction hash: {:?}", transaction_hash);
 
         Ok(SubmitResponse {
             success: true,
@@ -96,176 +105,55 @@ pub mod den {
         })
     }
 
-    pub fn validate_node(
-        ctx: Context<ValidateNode>,
-        _credentials: String,
-    ) -> Result<ValidateResponse> {
-        let _node = &ctx.accounts.node;
-
-        let is_valid = true;
-        let node_status = if is_valid { "active" } else { "inactive" }.to_string();
-
-        Ok(ValidateResponse {
-            is_valid,
-            node_status,
-        })
-    }
-
-    pub fn get_node_stats(ctx: Context<GetNodeStats>) -> Result<NodeStatsResponse> {
-        let node = &ctx.accounts.node;
-
-        let total_transactions = node.data.len() as u32;
-        let total_amount: u64 = node.data.iter().map(|entry| entry.amount).sum();
-        let active_since = node.active_since;
-
-        Ok(NodeStatsResponse {
-            total_transactions,
-            total_amount,
-            active_since,
-        })
-    }
-
-    pub fn remove_node(ctx: Context<RemoveNode>) -> Result<RemoveResponse> {
+    pub fn validate_invoice_data(
+        ctx: Context<ValidateInvoiceData>,
+        hsn_number: String,
+    ) -> Result<()> {
         let node = &mut ctx.accounts.node;
+        let admin_pubkey = ctx.accounts.admin.key.to_string();
 
-        node.data.clear();
-        node.is_active = false;
+        // List of admin public keys
+        let admin_pubkeys: &[String] = &[
+            String::from("FH5uTSXBJF4ZdF6UPPB5hzatuftB7mcyv6zsBWGz488p"),
+            String::from("EJgDmNKrTo1obSpANo6EDXZXbmChptzXJacdX5n82oYw"),
+            // Add more admins as needed
+        ];
 
-        Ok(RemoveResponse {
-            status: true,
-            message: "Node removed successfully".to_string(),
-        })
+        // Check if the payer's public key is one of the admin public keys
+        if !admin_pubkeys.contains(&admin_pubkey) {
+            // If the payer is not an admin, return an error
+            return Err(ErrorCode::ConstraintSigner.into());
+        }
+
+        for entry in node.data.iter_mut() {
+            if hsn_number.eq(&entry.hsn_number) {
+                entry.is_verified = true;
+                node.total_rewards += (entry.invoice_data.trim().len() / 1000) as f64;
+
+                msg!("Updated node account rewards: {}", node.total_rewards);
+
+                return Ok(());
+            }
+        }
+
+        // no record was found with the provided hsn_number
+        Err(ErrorCode::RequireEqViolated.into())
     }
-    pub fn query_economic_data(
-        ctx: Context<QueryEconomicData>,
-        start_date: i64,
-        end_date: i64,
-        parameters: QueryParameters,
-    ) -> Result<QueryResponse> {
-        let node = &ctx.accounts.node;
-    
-        let data: Vec<EconomicDataEntry> = node
-            .data
-            .iter()
-            .filter(|entry| entry.timestamp >= start_date && entry.timestamp <= end_date)
-            .filter(|entry| {
-                (parameters.hsn_number.is_empty() || entry.hsn_number == parameters.hsn_number) &&
-                (parameters.amount_range.is_none() ||
-                 (entry.amount >= parameters.amount_range.unwrap().min &&
-                  entry.amount <= parameters.amount_range.unwrap().max))
-            })
-            .cloned()
-            .collect();
-    
-        let status = if data.is_empty() {
-            "no data found"
-        } else {
-            "successful"
-        }.to_string();
-    
-        Ok(QueryResponse { data, status })
-    }
-
-    // share to earn
-    pub fn share_to_earn(ctx: Context<ShareToEarn>, invoice_data: String) -> Result<ShareToEarnResponse> {
-        let user = &mut ctx.accounts.user_account;
-
-        // rewards 10 scores for each share
-        let reward = 10;
-        user.total_rewards += reward;
-
-        // save invoice data
-        user.invoice_data.push(invoice_data);
-
-        Ok(ShareToEarnResponse {
-            success: true,
-            total_rewards: user.total_rewards,
-            message: "Thank you for sharing your invoice!".to_string(),
-        })
-    }
-
-}
-
-#[account]
-pub struct EconomicData {
-    pub node_id: Pubkey,           // The public key of the submitting node.
-    pub invoice_data: InvoiceData, // Contains the HSNNumber, amount, quantity, and timestamp.
 }
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = user, 
-        seeds = [b"example".as_ref()], bump,
-        space = 8 + 32 * 10)]
-    pub state: Account<'info, NftState>,
-
+    #[account(
+        init,
+        payer = user,
+        space = 8 + NodeAccount::BASE_SIZE,
+        seeds = [b"DATAMESH_NODE", user.key.as_ref()],
+        bump
+    )]
+    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
     #[account(mut)]
-    pub user: Signer<'info>,
-
+    pub user: Signer<'info>, // The user who is paying for the transaction
     pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct UpdateNfts<'info> {
-    #[account(mut)]
-    pub state: Account<'info, NftState>,
-    #[account(mut)]
-    pub admin: Signer<'info>,
-}
-
-#[derive(Accounts)]
-pub struct ShowNfts<'info> {
-    #[account(mut)]
-    pub state: Account<'info, NftState>,
-    #[account(mut)]
-    pub admin: Signer<'info>,
-}
-
-#[account]
-pub struct NftState {
-    pub nfts: Vec<Pubkey>,
-}
-
-#[account]
-#[derive(Default)]
-pub struct StakerStats {
-    stake_amount: u64,
-    buy_amount: u64,
-}
-
-#[account]
-#[derive(Default)]
-pub struct AdminStats {
-    stake_paused: bool,
-    withdraw_paused: bool,
-    bump: u8,
-    stake_count: u64,
-    lock_time: i64,
-    stake_amount: u64,
-    staker_amount: u32,
-    buy_paused: bool,
-    buy_amount: u64,
-    buyer_count: u32,
-}
-
-impl AdminStats {
-    pub const LEN: usize = 8 + 1 + 1 + 1 + 8 + 8 + 8 + 4 + 1 + 8 + 4;
-}
-
-#[account]
-pub struct Node {
-    pub node_id: Pubkey,
-    pub is_valid: bool,
-    pub total_transactions: u64,
-    pub total_amount: u64,
-    pub data: Vec<EconomicData>,
-}
-
-#[account]
-pub struct NodeStatus {
-    pub node_id: Pubkey,
-    pub is_valid: bool,
-    pub status: String,
 }
 
 #[account]
@@ -278,47 +166,42 @@ pub struct InvoiceData {
 
 #[derive(Accounts)]
 pub struct SubmitEconomicData<'info> {
+    #[account(
+        mut,
+        seeds = [b"DATAMESH_NODE", user.key.as_ref()],
+        bump
+    )]
+    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
     #[account(mut)]
-    pub node: Account<'info, NodeAccount>,
+    pub user: Signer<'info>, // The user who is paying for the transaction
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct ValidateNode<'info> {
-    pub node: Account<'info, NodeAccount>,
-}
-
-#[derive(Accounts)]
-pub struct QueryEconomicData<'info> {
-    pub node: Account<'info, NodeAccount>,
-}
-
-#[derive(Accounts)]
-pub struct GetNodeStats<'info> {
-    pub node: Account<'info, NodeAccount>,
-}
-
-#[derive(Accounts)]
-pub struct RemoveNode<'info> {
+pub struct ValidateInvoiceData<'info> {
     #[account(mut)]
-    pub node: Account<'info, NodeAccount>,
-}
-
-#[derive(Accounts)]
-pub struct ShareToEarn<'info> {
+    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
     #[account(mut)]
-    pub user_account: Account<'info, UserAccount>,
+    pub admin: Signer<'info>, // The user who is paying for the transaction
 }
-
 
 #[account]
+#[derive(Debug)]
 pub struct NodeAccount {
     pub node_id: Pubkey,
     pub data: Vec<EconomicDataEntry>,
     pub active_since: i64,
     pub is_active: bool,
+    pub total_rewards: f64,
+}
+
+impl NodeAccount {
+    // Set a base size excluding the data vector
+    const BASE_SIZE: usize = 32 + 8 + 1 + 8 + 4; // Pubkey + i64 + bool + u64 + u32
 }
 
 #[account]
+#[derive(Debug)]
 pub struct EconomicDataEntry {
     pub invoice_data: String,
     pub hsn_number: String,
@@ -326,6 +209,22 @@ pub struct EconomicDataEntry {
     pub quantity: u32,
     pub timestamp: i64,
     pub signature: String,
+    pub is_verified: bool,
+}
+
+// Implement a method to compute the size of EconomicDataEntry for serialization
+impl EconomicDataEntry {
+    fn size(&self) -> usize {
+        // Each string has an additional 4 bytes for its length
+        // Calculate the total size by adding lengths of each string and fixed fields
+        4 + self.invoice_data.len() +    // Length of invoice_data
+        4 + self.hsn_number.len() +      // Length of hsn_number
+        8 +  // u64 amount
+        4 +  // u32 quantity
+        8 +  // i64 timestamp
+        4 + self.signature.len() +       // Length of signature
+        1 // bool is_verified
+    }
 }
 
 #[derive(Copy, AnchorSerialize, AnchorDeserialize, Clone)]
@@ -335,51 +234,7 @@ pub struct Range {
 }
 
 #[account]
-pub struct QueryParameters {
-    pub hsn_number: String,
-    pub amount_range: Option<Range>,
-}
-
-#[account]
 pub struct SubmitResponse {
     pub success: bool,
     pub transaction_hash: String,
-}
-
-#[account]
-pub struct ValidateResponse {
-    pub is_valid: bool,
-    pub node_status: String,
-}
-
-#[account]
-pub struct QueryResponse {
-    pub data: Vec<EconomicDataEntry>,
-    pub status: String,
-}
-
-#[account]
-pub struct NodeStatsResponse {
-    pub total_transactions: u32,
-    pub total_amount: u64,
-    pub active_since: i64,
-}
-
-#[account]
-pub struct RemoveResponse {
-    pub status: bool,
-    pub message: String,
-}
-
-#[account]
-pub struct UserAccount {
-    pub user_id: Pubkey,
-    pub total_rewards: u64,
-    pub invoice_data: Vec<String>,
-}
-#[account]
-pub struct ShareToEarnResponse {
-    pub success: bool,
-    pub total_rewards: u64,
-    pub message: String,
 }
