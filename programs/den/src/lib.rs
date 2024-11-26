@@ -1,30 +1,16 @@
 use anchor_lang::prelude::*;
-use sha2::{Digest, Sha256};
 
-// This is your program's public key and it will update
-// automatically when you build the project.
+use anchor_lang::solana_program::hash::hash;
+use anchor_lang::solana_program::sysvar::rent::Rent;
+use anchor_lang::solana_program::{
+    account_info::AccountInfo, msg, program::invoke, pubkey::Pubkey, system_instruction,
+};
+
 declare_id!("4QdkkRpdSJo2Ut3zifVLnZ3VjJRJwa8kmmRCe5ZXSttQ");
 
 #[program]
 pub mod den {
-    use anchor_lang::solana_program::{program::invoke, system_instruction};
-
     use super::*;
-    // TODO: delete, it is useless
-    pub fn initialize_node(ctx: Context<Initialize>) -> Result<()> {
-        let node = &mut ctx.accounts.node;
-
-        msg!("Initializing new node account...");
-
-        node.node_id = node.key();
-        node.active_since = Clock::get()?.unix_timestamp;
-        node.is_active = true;
-        node.data = Vec::new(); // Initialize the empty vector
-
-        msg!("Node account is initialized to: {:?}", node);
-
-        Ok(())
-    }
 
     pub fn submit_economic_data(
         ctx: Context<SubmitEconomicData>,
@@ -33,193 +19,230 @@ pub mod den {
         amount: u64,
         quantity: u32,
         timestamp: i64,
-        signature: String,
         image_proof: String, // a link to an image in a decentralised DB, for verification by peers
     ) -> Result<()> {
-        msg!("Started deserializing accounts....");
-        let node = &mut ctx.accounts.node;
-        let node_account_info = node.to_account_info();
+        msg!("Started submitting economic data");
 
-        msg!("Deserialized accounts....");
+        let invoice_data = invoice_data.trim().to_string();
+        let hsn_number = hsn_number.trim().to_string();
+        let image_proof = image_proof.trim().to_string();
+        // Hash the invoice_data for the PDA
+        let invoice_data_hash = str_to_hashed_bytes(&invoice_data);
+
+        // Derive the PDA
+        let (pda, _bump_seed) =
+            Pubkey::find_program_address(&[&invoice_data_hash], &ctx.program_id);
+        msg!("Derived PDA: {:?}", pda);
+
+        // Check if the PDA account already exists to prevent duplicates
+        let pda_account_info = &ctx.accounts.economic_data_entry.to_account_info();
+        if !pda_account_info.data_is_empty() {
+            return Err(ErrorCode::InvoiceAlreadyExists.into());
+        }
 
         let new_entry = EconomicDataEntry {
+            invoice_data: invoice_data.clone(),
+            hsn_number: hsn_number.clone(),
             amount,
             quantity,
             timestamp,
-            hsn_number: hsn_number.trim().to_string(),
-            invoice_data: invoice_data.trim().to_string(),
-            signature: signature.trim().to_string(),
-            is_verified: 0,
-            image_proof,
+            image_proof: image_proof.clone(),
+            submitter: ctx.accounts.user.key(),
+            verification_status: 0,
+            verified_by: vec![],
+            rejected_by: vec![],
         };
 
-        // Calculate the new required size if adding a new entry
-        let current_size = node.to_account_info().data_len();
-        let required_size = (current_size + new_entry.size() + 4) * 2;
+        // Dynamically calculate the size of the account
+        let space_needed = new_entry.size();
 
-        // Check if we need to realloc (expand) the account size
-        let rent = Rent::get()?;
-        let required_lamports = rent.minimum_balance(required_size);
-
-        // Fund the account if needed
-        if node_account_info.lamports() < required_lamports {
-            msg!(
-                "Reallocating account to accommodate more data ({}, {})...",
-                required_size,
-                current_size
-            );
-
-            invoke(
-                &system_instruction::transfer(
-                    &ctx.accounts.user.key(),
-                    &node.key(),
-                    required_lamports - node_account_info.lamports(),
-                ),
-                &[
-                    ctx.accounts.user.to_account_info(),
-                    node.to_account_info(),
-                    ctx.accounts.system_program.to_account_info(),
-                ],
-            )?;
-            node_account_info.realloc(required_size, false)?;
+        let rent = &ctx.accounts.rent;
+        let rent_lamports = rent.minimum_balance(space_needed as usize);
+        if ctx.accounts.user.lamports() < rent_lamports {
+            return Err(ErrorCode::InsufficientFunds.into());
         }
 
-        // Add the new entry to the vector
-        node.data.push(new_entry);
+        let create_account_instruction = system_instruction::create_account(
+            &ctx.accounts.user.key(),
+            &pda,
+            rent_lamports,
+            space_needed as u64,
+            &ctx.accounts.system_program.key(),
+        );
 
-        msg!("Updated node account after adding new entry: {:?}", node);
+        msg!("Creating economic data account at PDA: {:?}", pda);
+        invoke(
+            &create_account_instruction,
+            &[
+                ctx.accounts.user.to_account_info(),
+                ctx.accounts.rent.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+        )
+        .map_err(|e| {
+            msg!("Failed to create PDA account: {:?}", e);
+            e
+        })?;
 
-        // Create a hash of the submitted economic data as a transaction identifier
-        let mut hasher = Sha256::new();
-        hasher.update(invoice_data.as_bytes());
-        hasher.update(hsn_number.as_bytes());
-        hasher.update(amount.to_le_bytes());
-        hasher.update(quantity.to_le_bytes());
-        hasher.update(timestamp.to_le_bytes());
-        hasher.update(signature.as_bytes());
+        // Initialize the data in the newly created PDA account
+        pda_account_info
+            .try_borrow_mut_data()?
+            .copy_from_slice(&new_entry.try_to_vec()?);
 
-        let transaction_hash = format!("{:x}", hasher.finalize());
-
-        msg!("Transaction hash: {:?}", transaction_hash);
-
+        msg!("Economic data entry successfully created and stored.");
         Ok(())
-        //Ok(SubmitResponse {
-        //    success: true,
-        //    transaction_hash,
-        //})
     }
 
     pub fn validate_invoice_data(
         ctx: Context<ValidateInvoiceData>,
-        hsn_number: String,
+        invoice_data: String, // not a hash, because on chain it is stored plain and for search
+        // would be inefficient to hash all of the entries
+        is_approval: bool,
     ) -> Result<()> {
-        // TODO: if user is the same as the one validated or rejected or a submitter - return
-        // if invoice status != 0 - return (trying to verify verified or rejected invoice)
-        // if validated 3 times - send 1 token to a submitter and 0.3 to each verifier (this
-        // program would hold our custom tokens)
-        let node = &mut ctx.accounts.node;
-        let admin_pubkey = ctx.accounts.admin.key.to_string();
+        // PLAN:
+        // if cannot find EconomicDataEntry by invoice_data_hash - Err(ErrorCode::NoEntryFound.into())
+        // if EconomicDataEntry.verification_status != 0 - Err(ErrorCode::InvoiceAlreadyProcessed.into())
+        // if signer is submitter - Err(ErrorCode::SelfApproval.into())
+        // if signer is among EconomicDataEntry.verified_by or EconomicDataEntry.rejected_by - Err(ErrorCode::DuplicateApprovalTry.into())
+        //
+        // signer sends hash if invoice_data and bool approved
+        // then we look for PDA, if no existing PDA - Err(ErrorCode::NoSuchEconomicEntry.into())
+        // if approved - add signer to EconomicDataEntry.verified_by, else to EconomicDataEntry.rejected_by
+        // if EconomicDataEntry.verified_by.size == 3 - EconomicDataEntry.verification_status = 1
+        // and send 1 token to submitter and 0.3 each for verifiers
+        // if EconomicDataEntry.rejected_by.size == 2 - EconomicDataEntry.verification_status = -1
+        // and send 0.5 each to verifiers
+        //
+        //let economic_data_entry = match &ctx.accounts.economic_data_entry {
+        //    Some(account) => account,
+        //    None => return Err(error!(ErrorCode::NoEntryFound)),
+        //};
+        let economic_data_entry = match ctx
+            .accounts
+            .to_account_info()
+            .clone()
+            .data
+            .borrow_mut()
+            .get_mut(&pda)
+        {
+            Some(account) => account,
+            None => {
+                return Err(ErrorCode::NoAccountFound.into());
+            }
+        };
 
-        // List of admin public keys
-        let admin_pubkeys: &[String] = &[
-            String::from("FH5uTSXBJF4ZdF6UPPB5hzatuftB7mcyv6zsBWGz488p"),
-            String::from("HfnUVwxtz83sF812JcVDACiJootAkuc2wyXvHiRpGTpi"),
-            // Add more admins as needed
-        ];
+        let economic_data_entry: Option<EconomicDataEntry> =
+            ctx.accounts.economic_data_entry.load()?;
 
-        // Check if the payer's public key is one of the admin public keys
-        if !admin_pubkeys.contains(&admin_pubkey) {
-            // If the payer is not an admin, return an error
-            return Err(ErrorCode::ConstraintSigner.into());
+        // Derive the PDA using the invoice_data_hash
+        let (pda, _bump) =
+            Pubkey::find_program_address(&[&str_to_hashed_bytes(&invoice_data)], ctx.program_id);
+
+        // Load the economic data entry from the context
+        let mut economic_data_entry = ctx.accounts.economic_data_entry.load_mut()?;
+
+        // Step 1: Verify if the PDA matches the expected invoice_data_hash
+        if economic_data_entry.invoice_data_hash != invoice_data_hash {
+            return Err(ErrorCode::NoEntryFound.into());
         }
 
-        // TODO: verify only if 3 peers different from who submitted it approved
-        // if 2 disapproved - the invoice is decided to be wrong
-        for entry in node.data.iter_mut() {
-            if hsn_number.eq(&entry.hsn_number) {
-                entry.is_verified = true;
-                node.total_rewards += (entry.invoice_data.trim().len() / 1000) as f64;
+        // Step 2: Ensure the entry has not already been processed
+        if economic_data_entry.verification_status != 0 {
+            return Err(ErrorCode::InvoiceAlreadyProcessed.into());
+        }
 
-                msg!("Updated node account rewards: {}", node.total_rewards);
+        // Step 3: Prevent the submitter from approving or rejecting their own entry
+        if economic_data_entry.submitter == *ctx.accounts.signer.key {
+            return Err(ErrorCode::SelfApproval.into());
+        }
 
-                return Ok(());
+        // Step 4: Check if the signer has already approved or rejected the entry
+        if economic_data_entry
+            .verified_by
+            .contains(ctx.accounts.signer.key)
+            || economic_data_entry
+                .rejected_by
+                .contains(ctx.accounts.signer.key)
+        {
+            return Err(ErrorCode::DuplicateApprovalTry.into());
+        }
+
+        // Step 5: Add the signer to the appropriate list based on approval or rejection
+        if is_approval {
+            economic_data_entry
+                .verified_by
+                .push(*ctx.accounts.signer.key);
+
+            // If 3 verifiers approve, mark as approved and distribute rewards
+            if economic_data_entry.verified_by.len() == 3 {
+                economic_data_entry.verification_status = 1;
+                // Logic to send tokens (e.g., via CPI) to submitter and verifiers
+            }
+        } else {
+            economic_data_entry
+                .rejected_by
+                .push(*ctx.accounts.signer.key);
+
+            // If 2 reject, mark as rejected and distribute rewards
+            if economic_data_entry.rejected_by.len() == 2 {
+                economic_data_entry.verification_status = -1;
+                // Logic to send tokens (e.g., via CPI) to verifiers
             }
         }
 
-        // no record was found with the provided hsn_number
-        Err(ErrorCode::RequireEqViolated.into())
+        Ok(())
     }
 }
 
-// TODO: delete, it is useless
-#[derive(Accounts)]
-pub struct Initialize<'info> {
-    #[account(
-        init,
-        payer = user,
-        space = 8 + NodeAccount::BASE_SIZE,
-        seeds = [b"DATAMESH_NODE", user.key.as_ref()],
-        bump
-    )]
-    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
-    #[account(mut)]
-    pub user: Signer<'info>, // The user who is paying for the transaction
-    pub system_program: Program<'info, System>,
+fn str_to_hashed_bytes(input: &str) -> Vec<u8> {
+    hash(input.as_bytes()).to_bytes().to_vec()
 }
 
-// TODO: delete this, it appears to be completely useless
-#[account]
-pub struct InvoiceData {
-    pub hsn_number: String,
-    pub amount: u64,
-    pub quantity: u64,
-    pub timestamp: i64,
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Invoice already exists.")]
+    InvoiceAlreadyExists,
+    #[msg("Invoice already processed.")]
+    InvoiceAlreadyProcessed,
+    #[msg("Insufficient Funds.")]
+    InsufficientFunds,
+    #[msg("Submitter is not allowed to approve his invoice.")]
+    SelfApproval,
+    #[msg("invoice data hash is invalid or there are no entries with this data")]
+    NoEntryFound,
+    #[msg("You're trying to approve or reject the invoice for the second time, please stop.")]
+    DuplicateApprovalTry,
 }
 
-// NEEDED
 #[derive(Accounts)]
+#[instruction(invoice_data: String, hsn_number: String, image_proof: String)]
 pub struct SubmitEconomicData<'info> {
-    #[account(
-        mut,
-        seeds = [b"DATAMESH_NODE", user.key.as_ref()],
-        bump
-    )]
-    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
     #[account(mut)]
-    pub user: Signer<'info>, // The user who is paying for the transaction
-    pub system_program: Program<'info, System>,
+    pub user: Signer<'info>, // The user submitting the data
+    pub economic_data_entry: Account<'info, EconomicDataEntry>, // The PDA account where data will be stored
+    pub rent: Sysvar<'info, Rent>, // Rent sysvar to check for rent-exemption
+    pub system_program: Program<'info, System>, // System program
 }
 
-// NEEDED
 #[derive(Accounts)]
+#[instruction(invoice_data: String)]
 pub struct ValidateInvoiceData<'info> {
-    #[account(mut)]
-    pub node: Account<'info, NodeAccount>, // NodeAccount is your custom struct for the account
-    #[account(mut)]
-    pub admin: Signer<'info>, // The user who is paying for the transaction
-}
-
-// TODO: delete, it is useless
-#[account]
-#[derive(Debug)]
-pub struct NodeAccount {
-    pub node_id: Pubkey,
-    pub data: Vec<EconomicDataEntry>,
-    pub active_since: i64,
-    pub is_active: bool,
-    pub total_rewards: f64,
-}
-
-// TODO: delete, it is useless
-impl NodeAccount {
-    // Set a base size excluding the data vector
-    const BASE_SIZE: usize = 32 + 8 + 1 + 8 + 4; // Pubkey + i64 + bool + u64 + u32
+    #[account(
+        mut, // this all actually gets the account with the seed (if no account - "ProgramDerivedAddress does not exist"), if there's an account but invoice_data is wrong - it says that there's nothing found. I'm too lazy to find ways to change default error
+        constraint = economic_data_entry.invoice_data == invoice_data @ ErrorCode::NoEntryFound,
+        seeds = [&str_to_hashed_bytes(&invoice_data)],
+        bump,
+    )]
+    pub economic_data_entry: Account<'info, EconomicDataEntry>,
+    #[account(signer)]
+    pub signer: Signer<'info>,
+    //pub system_program: Program<'info, System>, // do I really need this one?
 }
 
 #[account]
 #[derive(Debug)]
 pub struct EconomicDataEntry {
-    pub invoice_data: String,
+    pub invoice_data: String, // unique string
     pub hsn_number: String,
     pub amount: u64,
     pub quantity: u32,
@@ -227,36 +250,25 @@ pub struct EconomicDataEntry {
     pub image_proof: String, // a link to an image in a decentralised DB, for verification by peers
     pub submitter: Pubkey,   // address of person who submitted the invoice
     pub verification_status: i8, // 0 - unverified, 1 - verified, -1 - rejected
-    pub verified_by: Vec<Pubkey>, // vector of addresses of those who verified it
-    pub rejected_by: Vec<Pubkey>, // vector containing up to 2 addresses
+    pub verified_by: Vec<Pubkey>, // vector of addresses who verified it (up to 3)
+    pub rejected_by: Vec<Pubkey>, // vector of addresses who rejected it (up to 2)
 }
 
-// Implement a method to compute the size of EconomicDataEntry for serialization
 impl EconomicDataEntry {
-    fn size(&self) -> usize {
-        // Each string has an additional 4 bytes for its length
-        // Calculate the total size by adding lengths of each string and fixed fields
-        4 + self.invoice_data.len() +    // Length of invoice_data
-        4 + self.hsn_number.len() +      // Length of hsn_number
-        8 +  // u64 amount
-        4 +  // u32 quantity
-        8 +  // i64 timestamp
-        4 + self.signature.len() +       // Length of signature
-        1 // bool is_verified
+    // for serialization
+    fn calc_size(invoice_data: &str, hsn_number: &str, image_proof: &str) -> usize {
+        4 + invoice_data.len() +
+        4 + hsn_number.len() +
+        8 +  // amount: u64
+        4 +  // quantity: u32
+        8 +  // timestamp: i64
+        4 + image_proof.len() +
+        32 + // submitter: pubkey
+        1 + // verification_status: i8
+        4 + (3 * 32) + // verified_by: vec<pubkey> of max size 3
+        4 + (2 * 32) // rejected_by: vec<pubkey> of max size 2
     }
-}
-
-// TODO: delete this, it appears to be completely useless
-#[derive(Copy, AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct Range {
-    pub min: u64,
-    pub max: u64,
-}
-
-// TODO: delete, it is useless
-// for sending result of transaction from submit_economic_data()
-#[account]
-pub struct SubmitResponse {
-    pub success: bool,
-    pub transaction_hash: String,
+    fn size(&self) -> usize {
+        EconomicDataEntry::calc_size(&self.invoice_data, &self.hsn_number, &self.image_proof)
+    }
 }
