@@ -10,6 +10,7 @@ pub mod den {
     use anchor_lang::solana_program::{program::invoke, system_instruction};
 
     use super::*;
+    // TODO: delete, it is useless
     pub fn initialize_node(ctx: Context<Initialize>) -> Result<()> {
         let node = &mut ctx.accounts.node;
 
@@ -33,7 +34,8 @@ pub mod den {
         quantity: u32,
         timestamp: i64,
         signature: String,
-    ) -> Result<SubmitResponse> {
+        image_proof: String, // a link to an image in a decentralised DB, for verification by peers
+    ) -> Result<()> {
         msg!("Started deserializing accounts....");
         let node = &mut ctx.accounts.node;
         let node_account_info = node.to_account_info();
@@ -47,7 +49,8 @@ pub mod den {
             hsn_number: hsn_number.trim().to_string(),
             invoice_data: invoice_data.trim().to_string(),
             signature: signature.trim().to_string(),
-            is_verified: false,
+            is_verified: 0,
+            image_proof,
         };
 
         // Calculate the new required size if adding a new entry
@@ -99,16 +102,21 @@ pub mod den {
 
         msg!("Transaction hash: {:?}", transaction_hash);
 
-        Ok(SubmitResponse {
-            success: true,
-            transaction_hash,
-        })
+        Ok(())
+        //Ok(SubmitResponse {
+        //    success: true,
+        //    transaction_hash,
+        //})
     }
 
     pub fn validate_invoice_data(
         ctx: Context<ValidateInvoiceData>,
         hsn_number: String,
     ) -> Result<()> {
+        // TODO: if user is the same as the one validated or rejected or a submitter - return
+        // if invoice status != 0 - return (trying to verify verified or rejected invoice)
+        // if validated 3 times - send 1 token to a submitter and 0.3 to each verifier (this
+        // program would hold our custom tokens)
         let node = &mut ctx.accounts.node;
         let admin_pubkey = ctx.accounts.admin.key.to_string();
 
@@ -125,6 +133,8 @@ pub mod den {
             return Err(ErrorCode::ConstraintSigner.into());
         }
 
+        // TODO: verify only if 3 peers different from who submitted it approved
+        // if 2 disapproved - the invoice is decided to be wrong
         for entry in node.data.iter_mut() {
             if hsn_number.eq(&entry.hsn_number) {
                 entry.is_verified = true;
@@ -141,6 +151,7 @@ pub mod den {
     }
 }
 
+// TODO: delete, it is useless
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(
@@ -156,6 +167,7 @@ pub struct Initialize<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// TODO: delete this, it appears to be completely useless
 #[account]
 pub struct InvoiceData {
     pub hsn_number: String,
@@ -164,6 +176,7 @@ pub struct InvoiceData {
     pub timestamp: i64,
 }
 
+// NEEDED
 #[derive(Accounts)]
 pub struct SubmitEconomicData<'info> {
     #[account(
@@ -177,6 +190,7 @@ pub struct SubmitEconomicData<'info> {
     pub system_program: Program<'info, System>,
 }
 
+// NEEDED
 #[derive(Accounts)]
 pub struct ValidateInvoiceData<'info> {
     #[account(mut)]
@@ -185,6 +199,7 @@ pub struct ValidateInvoiceData<'info> {
     pub admin: Signer<'info>, // The user who is paying for the transaction
 }
 
+// TODO: delete, it is useless
 #[account]
 #[derive(Debug)]
 pub struct NodeAccount {
@@ -195,6 +210,7 @@ pub struct NodeAccount {
     pub total_rewards: f64,
 }
 
+// TODO: delete, it is useless
 impl NodeAccount {
     // Set a base size excluding the data vector
     const BASE_SIZE: usize = 32 + 8 + 1 + 8 + 4; // Pubkey + i64 + bool + u64 + u32
@@ -208,8 +224,11 @@ pub struct EconomicDataEntry {
     pub amount: u64,
     pub quantity: u32,
     pub timestamp: i64,
-    pub signature: String,
-    pub is_verified: bool,
+    pub image_proof: String, // a link to an image in a decentralised DB, for verification by peers
+    pub submitter: Pubkey,   // address of person who submitted the invoice
+    pub verification_status: i8, // 0 - unverified, 1 - verified, -1 - rejected
+    pub verified_by: Vec<Pubkey>, // vector of addresses of those who verified it
+    pub rejected_by: Vec<Pubkey>, // vector containing up to 2 addresses
 }
 
 // Implement a method to compute the size of EconomicDataEntry for serialization
@@ -227,12 +246,15 @@ impl EconomicDataEntry {
     }
 }
 
+// TODO: delete this, it appears to be completely useless
 #[derive(Copy, AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Range {
     pub min: u64,
     pub max: u64,
 }
 
+// TODO: delete, it is useless
+// for sending result of transaction from submit_economic_data()
 #[account]
 pub struct SubmitResponse {
     pub success: bool,
