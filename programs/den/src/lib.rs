@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
 
-use anchor_lang::solana_program::hash::hash;
 use anchor_lang::solana_program::sysvar::rent::Rent;
 use anchor_lang::solana_program::{
     account_info::AccountInfo, msg, program::invoke, pubkey::Pubkey, system_instruction,
@@ -26,16 +25,17 @@ pub mod den {
         let invoice_data = invoice_data.trim().to_string();
         let hsn_number = hsn_number.trim().to_string();
         let image_proof = image_proof.trim().to_string();
-        // Hash the invoice_data for the PDA
-        let invoice_data_hash = str_to_hashed_bytes(&invoice_data);
 
-        // Derive the PDA
         let (pda, _bump_seed) =
-            Pubkey::find_program_address(&[&invoice_data_hash], &ctx.program_id);
+            Pubkey::find_program_address(&[&invoice_data.as_bytes()], &ctx.program_id);
         msg!("Derived PDA: {:?}", pda);
 
-        // Check if the PDA account already exists to prevent duplicates
-        let pda_account_info = &ctx.accounts.economic_data_entry.to_account_info();
+        let pda_account_info = &ctx.accounts.unchecked_economic_data_entry.to_account_info();
+
+        if pda_account_info.key() != pda {
+            return Err(ErrorCode::InvalidPDA.into());
+        }
+
         if !pda_account_info.data_is_empty() {
             return Err(ErrorCode::InvoiceAlreadyExists.into());
         }
@@ -53,7 +53,6 @@ pub mod den {
             rejected_by: vec![],
         };
 
-        // Dynamically calculate the size of the account
         let space_needed = new_entry.size();
 
         let rent = &ctx.accounts.rent;
@@ -84,7 +83,6 @@ pub mod den {
             e
         })?;
 
-        // Initialize the data in the newly created PDA account
         pda_account_info
             .try_borrow_mut_data()?
             .copy_from_slice(&new_entry.try_to_vec()?);
@@ -112,114 +110,99 @@ pub mod den {
         // and send 1 token to submitter and 0.3 each for verifiers
         // if EconomicDataEntry.rejected_by.size == 2 - EconomicDataEntry.verification_status = -1
         // and send 0.5 each to verifiers
-        //
-        //let economic_data_entry = match &ctx.accounts.economic_data_entry {
-        //    Some(account) => account,
-        //    None => return Err(error!(ErrorCode::NoEntryFound)),
-        //};
-        let economic_data_entry = match ctx
-            .accounts
-            .to_account_info()
-            .clone()
-            .data
-            .borrow_mut()
-            .get_mut(&pda)
-        {
-            Some(account) => account,
-            None => {
-                return Err(ErrorCode::NoAccountFound.into());
-            }
-        };
 
-        let economic_data_entry: Option<EconomicDataEntry> =
-            ctx.accounts.economic_data_entry.load()?;
+        let invoice_data = invoice_data.trim().to_string();
 
-        // Derive the PDA using the invoice_data_hash
         let (pda, _bump) =
-            Pubkey::find_program_address(&[&str_to_hashed_bytes(&invoice_data)], ctx.program_id);
+            Pubkey::find_program_address(&[&invoice_data.as_bytes()], ctx.program_id);
 
-        // Load the economic data entry from the context
-        let mut economic_data_entry = ctx.accounts.economic_data_entry.load_mut()?;
+        let pda_account_info = &ctx.accounts.unchecked_economic_data_entry.to_account_info();
 
-        // Step 1: Verify if the PDA matches the expected invoice_data_hash
-        if economic_data_entry.invoice_data_hash != invoice_data_hash {
-            return Err(ErrorCode::NoEntryFound.into());
+        if pda_account_info.key() != pda {
+            return Err(ErrorCode::InvalidPDA.into());
         }
 
-        // Step 2: Ensure the entry has not already been processed
+        if pda_account_info.data_is_empty() {
+            return Err(ErrorCode::InvoiceDoesntExist.into());
+        }
+
+        let mut economic_data_entry =
+            EconomicDataEntry::try_from_slice(&pda_account_info.data.borrow())?;
+
         if economic_data_entry.verification_status != 0 {
             return Err(ErrorCode::InvoiceAlreadyProcessed.into());
         }
 
-        // Step 3: Prevent the submitter from approving or rejecting their own entry
-        if economic_data_entry.submitter == *ctx.accounts.signer.key {
+        if ctx.accounts.signer.key() != economic_data_entry.submitter {
             return Err(ErrorCode::SelfApproval.into());
         }
 
-        // Step 4: Check if the signer has already approved or rejected the entry
         if economic_data_entry
             .verified_by
-            .contains(ctx.accounts.signer.key)
+            .contains(&ctx.accounts.signer.key())
             || economic_data_entry
                 .rejected_by
-                .contains(ctx.accounts.signer.key)
+                .contains(&ctx.accounts.signer.key())
         {
             return Err(ErrorCode::DuplicateApprovalTry.into());
         }
 
-        // Step 5: Add the signer to the appropriate list based on approval or rejection
         if is_approval {
             economic_data_entry
                 .verified_by
-                .push(*ctx.accounts.signer.key);
-
-            // If 3 verifiers approve, mark as approved and distribute rewards
-            if economic_data_entry.verified_by.len() == 3 {
-                economic_data_entry.verification_status = 1;
-                // Logic to send tokens (e.g., via CPI) to submitter and verifiers
-            }
+                .push(ctx.accounts.signer.key());
         } else {
             economic_data_entry
                 .rejected_by
-                .push(*ctx.accounts.signer.key);
-
-            // If 2 reject, mark as rejected and distribute rewards
-            if economic_data_entry.rejected_by.len() == 2 {
-                economic_data_entry.verification_status = -1;
-                // Logic to send tokens (e.g., via CPI) to verifiers
-            }
+                .push(ctx.accounts.signer.key());
         }
+
+        if economic_data_entry.verified_by.len() == 3 {
+            economic_data_entry.verification_status = 1;
+            // TODO: send tokens
+        }
+
+        if economic_data_entry.rejected_by.len() == 2 {
+            economic_data_entry.verification_status = -1;
+            // TODO: send tokens
+        }
+
+        pda_account_info
+            .try_borrow_mut_data()?
+            .copy_from_slice(&economic_data_entry.try_to_vec()?);
 
         Ok(())
     }
-}
-
-fn str_to_hashed_bytes(input: &str) -> Vec<u8> {
-    hash(input.as_bytes()).to_bytes().to_vec()
 }
 
 #[error_code]
 pub enum ErrorCode {
     #[msg("Invoice already exists.")]
     InvoiceAlreadyExists,
+    #[msg("Invoice doesn't exist.")]
+    InvoiceDoesntExist,
     #[msg("Invoice already processed.")]
     InvoiceAlreadyProcessed,
     #[msg("Insufficient Funds.")]
     InsufficientFunds,
     #[msg("Submitter is not allowed to approve his invoice.")]
     SelfApproval,
-    #[msg("invoice data hash is invalid or there are no entries with this data")]
-    NoEntryFound,
     #[msg("You're trying to approve or reject the invoice for the second time, please stop.")]
     DuplicateApprovalTry,
+    #[msg("PDA of unchecked account is not the same")]
+    InvalidPDA,
 }
 
 #[derive(Accounts)]
 #[instruction(invoice_data: String, hsn_number: String, image_proof: String)]
 pub struct SubmitEconomicData<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>, // The user submitting the data
-    pub economic_data_entry: Account<'info, EconomicDataEntry>, // The PDA account where data will be stored
+    #[account(signer)] // account unchanged
+    pub user: Signer<'info>,
+    #[account(
+        seeds = [invoice_data.as_bytes()],
+        bump
+    )]
+    pub unchecked_economic_data_entry: UncheckedAccount<'info>, // The PDA account where data will be stored, needed for checks if it already exists, no automatic deserialisation
     pub rent: Sysvar<'info, Rent>, // Rent sysvar to check for rent-exemption
     pub system_program: Program<'info, System>, // System program
 }
@@ -228,15 +211,12 @@ pub struct SubmitEconomicData<'info> {
 #[instruction(invoice_data: String)]
 pub struct ValidateInvoiceData<'info> {
     #[account(
-        mut, // this all actually gets the account with the seed (if no account - "ProgramDerivedAddress does not exist"), if there's an account but invoice_data is wrong - it says that there's nothing found. I'm too lazy to find ways to change default error
-        constraint = economic_data_entry.invoice_data == invoice_data @ ErrorCode::NoEntryFound,
-        seeds = [&str_to_hashed_bytes(&invoice_data)],
+        seeds = [&invoice_data.as_bytes()],
         bump,
     )]
-    pub economic_data_entry: Account<'info, EconomicDataEntry>,
-    #[account(signer)]
+    pub unchecked_economic_data_entry: UncheckedAccount<'info>,
+    #[account(mut)] // account balance in tokens will be changed
     pub signer: Signer<'info>,
-    //pub system_program: Program<'info, System>, // do I really need this one?
 }
 
 #[account]
