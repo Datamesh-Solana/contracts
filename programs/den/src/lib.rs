@@ -10,7 +10,6 @@ declare_id!("4QdkkRpdSJo2Ut3zifVLnZ3VjJRJwa8kmmRCe5ZXSttQ");
 #[program]
 pub mod den {
     use super::*;
-
     pub fn submit_economic_data(
         ctx: Context<SubmitEconomicData>,
         invoice_data: String,
@@ -97,20 +96,6 @@ pub mod den {
         // would be inefficient to hash all of the entries
         is_approval: bool,
     ) -> Result<()> {
-        // PLAN:
-        // if cannot find EconomicDataEntry by invoice_data_hash - Err(ErrorCode::NoEntryFound.into())
-        // if EconomicDataEntry.verification_status != 0 - Err(ErrorCode::InvoiceAlreadyProcessed.into())
-        // if signer is submitter - Err(ErrorCode::SelfApproval.into())
-        // if signer is among EconomicDataEntry.verified_by or EconomicDataEntry.rejected_by - Err(ErrorCode::DuplicateApprovalTry.into())
-        //
-        // signer sends hash if invoice_data and bool approved
-        // then we look for PDA, if no existing PDA - Err(ErrorCode::NoSuchEconomicEntry.into())
-        // if approved - add signer to EconomicDataEntry.verified_by, else to EconomicDataEntry.rejected_by
-        // if EconomicDataEntry.verified_by.size == 3 - EconomicDataEntry.verification_status = 1
-        // and send 1 token to submitter and 0.3 each for verifiers
-        // if EconomicDataEntry.rejected_by.size == 2 - EconomicDataEntry.verification_status = -1
-        // and send 0.5 each to verifiers
-
         let invoice_data = invoice_data.trim().to_string();
 
         let (pda, _bump) =
@@ -159,12 +144,12 @@ pub mod den {
 
         if economic_data_entry.verified_by.len() == 3 {
             economic_data_entry.verification_status = 1;
-            // TODO: send tokens
+            // TODO: send tokens, 1 token to submitter and 0.3 each for verifiers
         }
 
         if economic_data_entry.rejected_by.len() == 2 {
             economic_data_entry.verification_status = -1;
-            // TODO: send tokens
+            // TODO: send tokens, 0.5 each to verifiers
         }
 
         pda_account_info
@@ -202,6 +187,8 @@ pub struct SubmitEconomicData<'info> {
         seeds = [invoice_data.as_bytes()],
         bump
     )]
+    /// CHECK: This account is used for manual existence checks and custom serialization.
+    /// We ensure its safety by verifying the data manually where required.
     pub unchecked_economic_data_entry: UncheckedAccount<'info>, // The PDA account where data will be stored, needed for checks if it already exists, no automatic deserialisation
     pub rent: Sysvar<'info, Rent>, // Rent sysvar to check for rent-exemption
     pub system_program: Program<'info, System>, // System program
@@ -214,6 +201,7 @@ pub struct ValidateInvoiceData<'info> {
         seeds = [&invoice_data.as_bytes()],
         bump,
     )]
+    /// CHECK: we check if an account exists to give user better errors 
     pub unchecked_economic_data_entry: UncheckedAccount<'info>,
     #[account(mut)] // account balance in tokens will be changed
     pub signer: Signer<'info>,
