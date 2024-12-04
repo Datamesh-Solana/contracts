@@ -43,9 +43,15 @@ try {
     console.error("Error calling submitEconomicData:", err);
 }
 
+// to validate invoices:
+const invData = "INV12345";
+const invoiceDataHashId = new BN(1);
+const args = {
+  invoiceDataHashId: invoiceDataHashId,
+  isApproval: true,
+};
 
-// to list all data of all accounts of a program:
-const [counterPubkey, _] = await anchor.web3.PublicKey.findProgramAddress(
+let [economic_data_account] = anchor.web3.PublicKey.findProgramAddressSync(
   [
     Buffer.from("economic_data"),
     pg.wallet.publicKey.toBuffer(),
@@ -53,13 +59,36 @@ const [counterPubkey, _] = await anchor.web3.PublicKey.findProgramAddress(
   ],
   pg.program.programId
 );
+try {
+  let tx = await pg.program.methods
+    .validateInvoiceData(args.invoiceDataHashId, args.isApproval)
+    .accounts({
+      economicDataAccount: economic_data_account,
+      authority: pg.wallet.publicKey,
+    })
+    .rpc();
+  console.log("tx: ", tx);
+} catch (err) {
+  console.error("Error calling submitEconomicData:", err);
+}
+
+
+// to list all data of all accounts of a program:
+const [counterPubkey, _] = await anchor.web3.PublicKey.findProgramAddress(
+    [
+        Buffer.from("economic_data"),
+        pg.wallet.publicKey.toBuffer(),
+        new BN(invoiceDataHashId).toArrayLike(Buffer, "le", 8),
+    ],
+    pg.program.programId
+);
 
 let accounts = await pg.connection.getProgramAccounts(pg.PROGRAM_ID);
 
 for (const account of accounts) {
-  let accountData = await pg.program.account.economicDataAccount.fetch(
-    account.pubkey
-  );
-  // Log the raw data of the account
-  console.log("Account data:", accountData);
+    let accountData = await pg.program.account.economicDataAccount.fetch(
+        account.pubkey
+    );
+    // Log the raw data of the account
+    console.log("Account data:", accountData);
 }

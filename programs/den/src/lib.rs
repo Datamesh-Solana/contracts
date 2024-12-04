@@ -41,6 +41,52 @@ pub mod den {
 
         Ok(())
     }
+
+    pub fn validate_invoice_data(
+        ctx: Context<ValidateInvoiceData>,
+        invoice_data_hash_id: u64,
+        is_approval: bool,
+    ) -> Result<()> {
+        let economic_data_account = &mut ctx.accounts.economic_data_account;
+
+        if economic_data_account.verification_status != 0 {
+            return Err(ErrorCode::InvoiceAlreadyProcessed.into());
+        }
+        if ctx.accounts.authority.key() == economic_data_account.submitter {
+            return Err(ErrorCode::SelfApproval.into());
+        }
+
+        let empty_pubkey: Pubkey = Pubkey::default();
+
+        if economic_data_account.approver2 == ctx.accounts.authority.key()
+            || economic_data_account.approver1 == ctx.accounts.authority.key()
+            || economic_data_account.rejector1 == ctx.accounts.authority.key()
+        {
+            return Err(ErrorCode::DuplicateApprovalTry.into());
+        }
+
+        if is_approval {
+            if economic_data_account.approver2 != empty_pubkey {
+                economic_data_account.approver3 = ctx.accounts.authority.key();
+                economic_data_account.verification_status = 1;
+            // TODO: send money
+            } else if economic_data_account.approver1 != empty_pubkey {
+                economic_data_account.approver2 = ctx.accounts.authority.key();
+            } else {
+                economic_data_account.approver1 = ctx.accounts.authority.key();
+            }
+        } else {
+            if economic_data_account.rejector1 != empty_pubkey {
+                economic_data_account.rejector2 = ctx.accounts.authority.key();
+                economic_data_account.verification_status = -1;
+            //TODO: send money
+            } else {
+                economic_data_account.rejector1 = ctx.accounts.authority.key();
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -81,52 +127,6 @@ pub struct EconomicDataAccount {
     pub rejector2: Pubkey,
     // pub verified_by: Vec<Pubkey>, // vector of addresses who verified it (up to 3)
     // pub rejected_by: Vec<Pubkey>, // vector of addresses who rejected it (up to 2)
-}
-
-pub fn validate_invoice_data(
-    ctx: Context<ValidateInvoiceData>,
-    invoice_data_hash_id: u64,
-    is_approval: bool,
-) -> Result<()> {
-    let economic_data_account = &mut ctx.accounts.economic_data_account;
-
-    if economic_data_account.verification_status != 0 {
-        return Err(ErrorCode::InvoiceAlreadyProcessed.into());
-    }
-    if ctx.accounts.authority.key() != economic_data_account.submitter {
-        return Err(ErrorCode::SelfApproval.into());
-    }
-
-    let empty_pubkey: Pubkey = Pubkey::default();
-
-    if economic_data_account.approver2 == ctx.accounts.authority.key()
-        || economic_data_account.approver1 == ctx.accounts.authority.key()
-        || economic_data_account.rejector1 == ctx.accounts.authority.key()
-    {
-        return Err(ErrorCode::DuplicateApprovalTry.into());
-    }
-
-    if is_approval {
-        if economic_data_account.approver2 != empty_pubkey {
-            economic_data_account.approver3 = ctx.accounts.authority.key();
-            economic_data_account.verification_status = 1;
-        // TODO: send money
-        } else if economic_data_account.approver1 != empty_pubkey {
-            economic_data_account.approver2 = ctx.accounts.authority.key();
-        } else {
-            economic_data_account.approver1 = ctx.accounts.authority.key();
-        }
-    } else {
-        if economic_data_account.rejector1 != empty_pubkey {
-            economic_data_account.rejector2 = ctx.accounts.authority.key();
-            economic_data_account.verification_status = -1;
-        //TODO: send money
-        } else {
-            economic_data_account.rejector1 = ctx.accounts.authority.key();
-        }
-    }
-
-    Ok(())
 }
 
 #[derive(Accounts)]
