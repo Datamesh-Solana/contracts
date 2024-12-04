@@ -1,10 +1,12 @@
-{
+    {
   "compilerOptions": {
-    "types": ["mocha", "chai"],
-    "typeRoots": ["./node_modules/@types"],
-    "lib": ["es2015"],
-    "module": "commonjs",
-    "target": "es6",
-    "esModuleInterop": true
-  }
+    "module": "ESNext",          // Use ESNext module system for ESM compatibility
+    "target": "ESNext",          // Use ESNext as the target for modern JavaScript
+    "esModuleInterop": true,     // Enable esModuleInterop for default imports
+    "moduleResolution": "Node",  // Resolve modules using Node.js conventions
+    "strict": true,              // Enable strict mode for better type safety
+    "skipLibCheck": true         // Skip type checking of declaration files (optional, but helps with some packages)
+  },
+  "include": ["client/**/*.ts"]
 }
+
