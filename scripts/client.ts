@@ -42,3 +42,24 @@ try {
 } catch (err) {
     console.error("Error calling submitEconomicData:", err);
 }
+
+
+// to list all data of all accounts of a program:
+const [counterPubkey, _] = await anchor.web3.PublicKey.findProgramAddress(
+  [
+    Buffer.from("economic_data"),
+    pg.wallet.publicKey.toBuffer(),
+    new BN(invoiceDataHashId).toArrayLike(Buffer, "le", 8),
+  ],
+  pg.program.programId
+);
+
+let accounts = await pg.connection.getProgramAccounts(pg.PROGRAM_ID);
+
+for (const account of accounts) {
+  let accountData = await pg.program.account.economicDataAccount.fetch(
+    account.pubkey
+  );
+  // Log the raw data of the account
+  console.log("Account data:", accountData);
+}
